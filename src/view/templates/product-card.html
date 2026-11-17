@@ -1,11 +1,11 @@
 <div class="col-md-3 mb-3">
-    <div class="card product-card h-100 shadow-sm">
+    <div class="card product-card h-100 shadow-sm border">
         <div class="card-body d-flex flex-column">
-            <h5 class="card-title">{{name}}</h5>
-            <h6 class="card-subtitle mb-2 text-muted text-capitalize">{{category}}</h6>
+            <h5 class="card-title text-primary fs-5">{{name}}</h5>
+            <h6 class="card-subtitle mb-2 text-muted text-capitalize"><i class="bi bi-tag"></i> {{category}}</h6>
             <p class="card-text flex-grow-1">
-                <strong>Price:</strong> ${{price}}<br>
-                <strong>Color:</strong> {{color}}<br>
+                <strong>Preço:</strong> R$ {{price}}<br>
+                <strong>Armazenamento:</strong> <span class="badge bg-secondary">{{storage}}</span><br>
                 {{scoreBadge}}
             </p>
             <button class="btn btn-primary buy-now-btn mt-2" data-product='{{product}}'>

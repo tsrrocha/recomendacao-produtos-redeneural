@@ -1,7 +1,7 @@
 import 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js';
 import { workerEvents } from '../events/constants.js';
 
-console.log('Model training worker initialized');
+console.log('Model training worker initialized for Bakery Dataset');
 let _globalCtx = {};
 let _model = null;
 
@@ -11,13 +11,13 @@ const API_BASE_URL = self.location.port === '3000'
 
 const WEIGHTS = {
     category: 0.4,
-    color: 0.3,
+    storage: 0.3,
     price: 0.2,
     age: 0.1
 };
 
 /*===================================================================================================
-                                   SETUP DO DATASET PARA TREINAMENTO
+                       SETUP DO DATASET DA PADARIA PARA TREINAMENTO
 ===================================================================================================*/
 
 const normalize = (value, min, max) => (value - min) / ((max - min) || 1);
@@ -31,18 +31,19 @@ function makeContext(products, users) {
     const maxAge = Math.max(...ages);
     const minPrice = Math.min(...prices);
     const maxPrice = Math.max(...prices);
-    const colors = [...new Set(products.map(p => p.color))];
+
+    const storages = [...new Set(products.map(p => p.storage || p.color || 'Standard'))];
     const categories = [...new Set(products.map(p => p.category))];
 
-    const colorsIndex = Object.fromEntries(
-        colors.map((color, index) => [color, index])
+    const storagesIndex = Object.fromEntries(
+        storages.map((storage, index) => [storage, index])
     );
 
     const categoriesIndex = Object.fromEntries(
         categories.map((category, index) => [category, index])
     );
 
-    // Computar a média de idade dos compradores por produto
+    // Computar a média de idade dos compradores por produto de padaria
     const midAge = (minAge + maxAge) / 2;
     const ageSums = {};
     const ageCounts = {};
@@ -67,7 +68,7 @@ function makeContext(products, users) {
     return {
         products,
         users,
-        colorsIndex,
+        storagesIndex,
         categoriesIndex,
         minAge,
         maxAge,
@@ -75,8 +76,8 @@ function makeContext(products, users) {
         maxPrice,
         productAvgAgeNorm,
         numCategories: categories.length,
-        numColors: colors.length,
-        dimentions: 2 + categories.length + colors.length
+        numStorages: storages.length,
+        dimentions: 2 + categories.length + storages.length
     };
 }
 
@@ -99,18 +100,19 @@ function encodeProduct(product, context) {
     ]);
 
     const category = oneHotWeighted(
-        context.categoriesIndex[product.category],
+        context.categoriesIndex[product.category] ?? 0,
         context.numCategories,
         WEIGHTS.category
     );
 
-    const color = oneHotWeighted(
-        context.colorsIndex[product.color],
-        context.numColors,
-        WEIGHTS.color
+    const storageVal = product.storage || product.color || 'Standard';
+    const storage = oneHotWeighted(
+        context.storagesIndex[storageVal] ?? 0,
+        context.numStorages,
+        WEIGHTS.storage
     );
 
-    return tf.concat1d([price, age, category, color]);
+    return tf.concat1d([price, age, category, storage]);
 }
 
 function encodeUser(user, context) {
@@ -128,12 +130,12 @@ function encodeUser(user, context) {
     }
 
     return tf.concat1d([
-        tf.zeros([1]), // O preço é ignorado
+        tf.zeros([1]), // Preço ignorado no perfil base
         tf.tensor1d([
             normalize(user.age, context.minAge, context.maxAge) * WEIGHTS.age
         ]),
         tf.zeros([context.numCategories]), // Categorias ignoradas
-        tf.zeros([context.numColors]), // Cores ignoradas
+        tf.zeros([context.numStorages]),   // Armazenamento ignorado
     ]).reshape([1, context.dimentions]);
 }
 
@@ -201,8 +203,9 @@ async function configureNeuralNetAndTrain(trainData) {
         metrics: ['accuracy']
     });
 
+    const epochs = 40;
     await model.fit(trainData.xs, trainData.ys, {
-        epochs: 100,
+        epochs,
         batchSize: 32,
         shuffle: true,
         callbacks: {
@@ -221,27 +224,28 @@ async function configureNeuralNetAndTrain(trainData) {
 }
 
 async function trainModel({ users }) {
-    console.log('Training model with users:', users);
+    console.log('[Worker] Iniciando treinamento com clientes da padaria:', users.length);
 
-    postMessage({ type: workerEvents.progressUpdate, progress: { progress: 30 } });
+    postMessage({ type: workerEvents.progressUpdate, progress: { progress: 20 } });
 
-    // 1. Obter produtos da API do banco de dados vetorial
+    // 1. Obter os produtos de padaria exclusivamente da API do banco de dados vetorial
     let products = [];
     try {
         const prodRes = await fetch(`${API_BASE_URL}/products`);
         if (prodRes.ok) {
             products = await prodRes.json();
+            console.log(`[Worker] ${products.length} produtos obtidos da API do Banco Vetorial.`);
         } else {
-            throw new Error('Falha ao obter produtos da API');
+            throw new Error(`Falha na API: ${prodRes.status}`);
         }
     } catch (err) {
-        console.warn('[Worker] Usando fallback local para /data/products.json:', err.message);
-        products = await (await fetch('/data/products.json')).json();
+        console.error('[Worker] Erro crítico ao obter produtos do banco vetorial:', err);
+        return;
     }
 
-    postMessage({ type: workerEvents.progressUpdate, progress: { progress: 50 } });
+    postMessage({ type: workerEvents.progressUpdate, progress: { progress: 40 } });
 
-    // 2. Gerar o contexto e os vetores de cada produto
+    // 2. Gerar o contexto e os vetores numéricos de cada produto da padaria
     const context = makeContext(products, users);
     context.productVectors = products.map(product => {
         return {
@@ -254,7 +258,7 @@ async function trainModel({ users }) {
 
     _globalCtx = context;
 
-    // 3. Persistir os embeddings gerados no Banco de Dados Vetorial!
+    // 3. Persistir os embeddings gerados no Banco de Dados Vetorial SQLite via API!
     try {
         const itemsToSave = context.productVectors.map(pv => ({
             id: pv.id,
@@ -265,12 +269,13 @@ async function trainModel({ users }) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ items: itemsToSave })
         });
-        console.log('[Worker] Embeddings gravados com sucesso no Banco de Dados Vetorial!');
+        console.log(`[Worker] ${itemsToSave.length} embeddings de produtos salvos no Banco Vetorial!`);
     } catch (err) {
-        console.warn('[Worker] Aviso ao salvar embeddings no banco:', err.message);
+        console.warn('[Worker] Aviso ao persistir embeddings no banco:', err.message);
     }
 
     // 4. Treinar a rede neural
+    postMessage({ type: workerEvents.progressUpdate, progress: { progress: 60 } });
     const trainData = createTrainingData(context);
     _model = await configureNeuralNetAndTrain(trainData);
 
@@ -283,12 +288,12 @@ async function recommend(user, ctx) {
 
     const context = _globalCtx;
 
-    // Converte o usuário fornecido no vetor de features codificadas
+    // Converte o usuário selecionado no vetor de features
     const userVector = encodeUser(user, context).dataSync();
 
     // =========================================================================
     // ETAPA 1: BUSCA NO BANCO DE DADOS VETORIAL (Vector Database Retrieval)
-    // Busca no banco os produtos mais similares ao vetor do usuário via SQL
+    // Busca no SQLite via SQL cosine_similarity os produtos de padaria mais próximos
     // =========================================================================
     let candidates = [];
     try {
@@ -307,10 +312,10 @@ async function recommend(user, ctx) {
             console.log(`[Worker] Banco vetorial retornou ${candidates.length} produtos candidatos.`);
         }
     } catch (err) {
-        console.warn('[Worker] Busca vetorial na API não alcançada, usando produtos locais:', err);
+        console.warn('[Worker] Busca vetorial na API não alcançada, usando lista local:', err);
     }
 
-    // Mapeia os produtos a serem avaliados pela rede neural
+    // Mapeia os produtos a serem ranqueados pela rede neural
     let productsToScore = [];
     if (candidates.length > 0) {
         productsToScore = candidates.map(c => {
@@ -329,7 +334,7 @@ async function recommend(user, ctx) {
 
     // =========================================================================
     // ETAPA 2: RE-RANKING COM REDE NEURAL (TensorFlow.js Re-ranking)
-    // A rede neural refinada calcula a pontuação final para cada candidato
+    // A rede neural calcula a pontuação final (0.00 a 1.00) para cada candidato
     // =========================================================================
     const inputs = productsToScore.map(({ vector }) => {
         return [...userVector, ...vector];
@@ -344,14 +349,14 @@ async function recommend(user, ctx) {
             ...item.meta,
             id: item.id,
             name: item.name,
-            score: scores[index], // Predição da rede neural (0.00 a 1.00)
-            vectorSimilarity: item.vectorSimilarity !== undefined ? item.vectorSimilarity : null // Similaridade vetorial do banco
+            score: scores[index],
+            vectorSimilarity: item.vectorSimilarity !== undefined ? item.vectorSimilarity : null
         };
     });
 
     const sortedItems = recommendations.sort((a, b) => b.score - a.score);
 
-    console.log('[Worker] Recomendações prontas para:', user.name);
+    console.log('[Worker] Recomendações prontas para cliente:', user.name);
 
     postMessage({
         type: workerEvents.recommend,

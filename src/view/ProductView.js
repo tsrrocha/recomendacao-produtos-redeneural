@@ -19,7 +19,7 @@ export class ProductView extends View {
     }
 
     onUserSelected(user) {
-        // Enable buttons if a user is selected, otherwise disable them
+        // Habilita botões se um usuário estiver selecionado
         this.setButtonsState(user && user.id ? false : true);
     }
 
@@ -50,12 +50,15 @@ export class ProductView extends View {
                 `;
             }
 
+            const storageDisplay = product.storage || product.color || 'Room Temperature';
+
             return this.replaceTemplate(this.#productTemplate, {
                 id: product.id,
                 name: product.name,
                 category: product.category,
-                price: product.price,
-                color: product.color,
+                price: Number(product.price).toFixed(2),
+                storage: storageDisplay,
+                color: storageDisplay,
                 scoreBadge,
                 product: JSON.stringify(product)
             });
@@ -64,7 +67,7 @@ export class ProductView extends View {
         this.#productList.innerHTML = html;
         this.attachBuyButtonListeners();
 
-        // Disable all buttons by default
+        // Disable all buttons by default if needed
         this.setButtonsState(disableButtons);
     }
 

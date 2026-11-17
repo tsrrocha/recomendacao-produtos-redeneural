@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
-import { readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseBakeryCsvSync } from './seed_bakery.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_PATH = resolve(__dirname, 'data.db');
@@ -14,10 +14,10 @@ class VectorDatabase {
     }
 
     init() {
-        // Inicializa o banco de dados SQLite persistente em arquivo
+        // Inicializa o banco de dados SQLite persistente em disco
         this.#db = new DatabaseSync(DB_PATH);
 
-        // Registra a função de similaridade de cosseno diretamente no SQL do SQLite
+        // Registra a função SQL de similaridade de cosseno
         // similaridade = (A . B) / (||A|| * ||B||)
         this.#db.function('cosine_similarity', (vecAJson, vecBJson) => {
             if (!vecAJson || !vecBJson) return 0;
@@ -73,7 +73,7 @@ class VectorDatabase {
         // Cria as tabelas necessárias
         this.createTables();
 
-        // Se o banco estiver vazio, carrega os dados iniciais dos arquivos .json
+        // Se o banco estiver vazio ou com o schema antigo, popula com o dataset da padaria
         this.seedIfEmpty();
     }
 
@@ -84,16 +84,38 @@ class VectorDatabase {
                 name TEXT NOT NULL,
                 category TEXT NOT NULL,
                 price REAL NOT NULL,
-                color TEXT NOT NULL,
+                storage TEXT NOT NULL DEFAULT 'Room Temperature',
+                color TEXT NOT NULL DEFAULT 'Room Temperature',
                 embedding TEXT -- Vetor numérico serializado em JSON
             );
+        `);
 
+        // Garante que a coluna storage existe caso a tabela tenha sido criada na versão anterior
+        try {
+            this.#db.exec(`ALTER TABLE products ADD COLUMN storage TEXT NOT NULL DEFAULT 'Room Temperature';`);
+        } catch (e) {
+            // Coluna já existe
+        }
+
+        this.#db.exec(`
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
-                age INTEGER NOT NULL
+                age INTEGER NOT NULL,
+                code TEXT,
+                segment TEXT
             );
+        `);
 
+        try {
+            this.#db.exec(`ALTER TABLE users ADD COLUMN code TEXT;`);
+        } catch (e) {}
+
+        try {
+            this.#db.exec(`ALTER TABLE users ADD COLUMN segment TEXT;`);
+        } catch (e) {}
+
+        this.#db.exec(`
             CREATE TABLE IF NOT EXISTS purchases (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -107,18 +129,15 @@ class VectorDatabase {
 
     seedIfEmpty() {
         const productCount = this.#db.prepare('SELECT count(*) as count FROM products').get().count;
-        if (productCount === 0) {
+        // Se estiver com menos de 35 produtos, precisa atualizar para o dataset da padaria
+        if (productCount < 35) {
             this.seed();
         }
     }
 
     seed() {
-        console.log('[Database] Populando banco de dados a partir dos arquivos JSON...');
-        const productsPath = resolve(__dirname, '../data/products.json');
-        const usersPath = resolve(__dirname, '../data/users.json');
-
-        const products = JSON.parse(readFileSync(productsPath, 'utf-8'));
-        const users = JSON.parse(readFileSync(usersPath, 'utf-8'));
+        console.log('[Database] Populando banco de dados com os dados do bakery_sales_dataset.csv...');
+        const { products, users } = parseBakeryCsvSync(35);
 
         // Limpa tabelas existentes
         this.#db.exec(`
@@ -127,20 +146,20 @@ class VectorDatabase {
             DELETE FROM products;
         `);
 
-        // Insere produtos
+        // Insere os 35 produtos da padaria
         const insertProduct = this.#db.prepare(`
-            INSERT INTO products (id, name, category, price, color, embedding)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO products (id, name, category, price, storage, color, embedding)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         `);
 
         for (const p of products) {
-            insertProduct.run(p.id, p.name, p.category, p.price, p.color, null);
+            insertProduct.run(p.id, p.name, p.category, p.price, p.storage, p.color, null);
         }
 
-        // Insere usuários e compras
+        // Insere os clientes da padaria e seus históricos de compras
         const insertUser = this.#db.prepare(`
-            INSERT INTO users (id, name, age)
-            VALUES (?, ?, ?)
+            INSERT INTO users (id, name, age, code, segment)
+            VALUES (?, ?, ?, ?, ?)
         `);
 
         const insertPurchase = this.#db.prepare(`
@@ -149,7 +168,7 @@ class VectorDatabase {
         `);
 
         for (const u of users) {
-            insertUser.run(u.id, u.name, u.age);
+            insertUser.run(u.id, u.name, u.age, u.code, u.segment);
             if (Array.isArray(u.purchases)) {
                 for (const pur of u.purchases) {
                     insertPurchase.run(u.id, pur.id);
@@ -157,13 +176,13 @@ class VectorDatabase {
             }
         }
 
-        console.log(`[Database] Seed concluído: ${products.length} produtos e ${users.length} usuários carregados.`);
+        console.log(`[Database] Seed concluído: ${products.length} produtos de padaria e ${users.length} clientes carregados no banco!`);
     }
 
     // ==================== OPERAÇÕES DE PRODUTOS ====================
 
     getProducts() {
-        const stmt = this.#db.prepare('SELECT id, name, category, price, color, embedding FROM products ORDER BY id');
+        const stmt = this.#db.prepare('SELECT id, name, category, price, storage, color, embedding FROM products ORDER BY id');
         const rows = stmt.all();
         return rows.map(r => ({
             ...r,
@@ -172,7 +191,7 @@ class VectorDatabase {
     }
 
     getProductById(id) {
-        const stmt = this.#db.prepare('SELECT id, name, category, price, color, embedding FROM products WHERE id = ?');
+        const stmt = this.#db.prepare('SELECT id, name, category, price, storage, color, embedding FROM products WHERE id = ?');
         const row = stmt.get(Number(id));
         if (!row) return null;
         return {
@@ -198,17 +217,17 @@ class VectorDatabase {
     }
 
     // ==================== BUSCA VETORIAL (VECTOR SIMILARITY SEARCH) ====================
-    // Executa a busca no banco vetorial ordenando por similaridade de cosseno
+    // Executa a busca no banco vetorial ordenando por similaridade de cosseno via SQL
     searchSimilarProducts(userVector, limit = 10) {
         const queryVectorJson = JSON.stringify(Array.from(userVector));
 
-        // Executa a query vetorial usando a função SQL cosine_similarity registrada
         const stmt = this.#db.prepare(`
             SELECT 
                 p.id, 
                 p.name, 
                 p.category, 
                 p.price, 
+                p.storage,
                 p.color,
                 p.embedding,
                 cosine_similarity(p.embedding, ?) AS vector_similarity
@@ -225,6 +244,7 @@ class VectorDatabase {
             name: r.name,
             category: r.category,
             price: r.price,
+            storage: r.storage,
             color: r.color,
             vectorSimilarity: Number(r.vector_similarity.toFixed(4)),
             embedding: r.embedding ? JSON.parse(r.embedding) : null
@@ -234,11 +254,11 @@ class VectorDatabase {
     // ==================== OPERAÇÕES DE USUÁRIOS E COMPRAS ====================
 
     getUsers() {
-        const usersStmt = this.#db.prepare('SELECT id, name, age FROM users ORDER BY id');
+        const usersStmt = this.#db.prepare('SELECT id, name, age, code, segment FROM users ORDER BY id');
         const users = usersStmt.all();
 
         const purchasesStmt = this.#db.prepare(`
-            SELECT p.id, p.name, p.category, p.price, p.color
+            SELECT p.id, p.name, p.category, p.price, p.storage, p.color
             FROM purchases pur
             JOIN products p ON pur.product_id = p.id
             WHERE pur.user_id = ?
@@ -255,12 +275,12 @@ class VectorDatabase {
     }
 
     getUserById(id) {
-        const userStmt = this.#db.prepare('SELECT id, name, age FROM users WHERE id = ?');
+        const userStmt = this.#db.prepare('SELECT id, name, age, code, segment FROM users WHERE id = ?');
         const user = userStmt.get(Number(id));
         if (!user) return null;
 
         const purchasesStmt = this.#db.prepare(`
-            SELECT p.id, p.name, p.category, p.price, p.color
+            SELECT p.id, p.name, p.category, p.price, p.storage, p.color
             FROM purchases pur
             JOIN products p ON pur.product_id = p.id
             WHERE pur.user_id = ?
@@ -274,16 +294,16 @@ class VectorDatabase {
         };
     }
 
-    addUser({ id, name, age }) {
+    addUser({ id, name, age, segment = 'New Customer' }) {
         const existing = this.getUserById(id);
         if (existing) {
-            const updateStmt = this.#db.prepare('UPDATE users SET name = ?, age = ? WHERE id = ?');
-            updateStmt.run(name, Number(age), Number(id));
+            const updateStmt = this.#db.prepare('UPDATE users SET name = ?, age = ?, segment = ? WHERE id = ?');
+            updateStmt.run(name, Number(age), segment, Number(id));
             return this.getUserById(id);
         }
 
-        const insertStmt = this.#db.prepare('INSERT INTO users (id, name, age) VALUES (?, ?, ?)');
-        insertStmt.run(Number(id), name, Number(age));
+        const insertStmt = this.#db.prepare('INSERT INTO users (id, name, age, segment) VALUES (?, ?, ?, ?)');
+        insertStmt.run(Number(id), name, Number(age), segment);
         return this.getUserById(id);
     }
 
@@ -294,7 +314,6 @@ class VectorDatabase {
     }
 
     removePurchase(userId, productId) {
-        // Remove a compra mais recente desse produto feita pelo usuário
         const findStmt = this.#db.prepare(`
             SELECT id FROM purchases 
             WHERE user_id = ? AND product_id = ? 
@@ -316,6 +335,7 @@ class VectorDatabase {
 
         return {
             engine: 'SQLite Vector DB (Built-in Node.js node:sqlite)',
+            dataset: 'Bakery Sales Dataset (Padaria)',
             databasePath: DB_PATH,
             totalProducts: productCount,
             productsWithVectors: vectorCount,
@@ -326,4 +346,3 @@ class VectorDatabase {
 }
 
 export const db = new VectorDatabase();
-

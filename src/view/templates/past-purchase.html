@@ -1,6 +1,11 @@
 <div class="col-md-6 mb-2">
-    <div class="past-purchase" data-product='{{product}}'>
-        <strong>{{name}}</strong> - Price {{price}} - Color {{color}}
-        <i class="bi bi-x-circle text-danger float-end" title="Remove purchase"></i>
+    <div class="past-purchase p-2 border rounded shadow-sm bg-light" data-product='{{product}}'>
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <strong>{{name}}</strong><br>
+                <small class="text-muted">R$ {{price}} &bull; {{storage}}</small>
+            </div>
+            <i class="bi bi-x-circle text-danger fs-5" title="Remover compra" style="cursor: pointer;"></i>
+        </div>
     </div>
 </div>

@@ -36,7 +36,7 @@ async function updateDbStatus() {
 const resetBtn = document.getElementById('dbResetBtn');
 if (resetBtn) {
     resetBtn.addEventListener('click', async () => {
-        if (!confirm('Deseja realmente resetar o banco de dados para os valores originais do JSON?')) return;
+        if (!confirm('Deseja realmente resetar o banco de dados para os valores do dataset da padaria?')) return;
         try {
             const res = await fetch(`${API_BASE_URL}/database/reset`, { method: 'POST' });
             if (res.ok) {
