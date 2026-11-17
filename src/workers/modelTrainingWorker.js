@@ -5,10 +5,12 @@ console.log('Model training worker initialized for Bakery Dataset');
 let _globalCtx = {};
 let _model = null;
 
-const API_BASE_URL = self.location.port === '3000' 
-    ? 'http://localhost:3002/api' 
+// Base da API para coletar os dados do Banco de Dados Vetorial 
+const API_BASE_URL = self.location.port === '3000'
+    ? 'http://localhost:3002/api'
     : `${self.location.origin}/api`;
 
+// Definição de pesos
 const WEIGHTS = {
     category: 0.4,
     storage: 0.3,
@@ -22,6 +24,22 @@ const WEIGHTS = {
 
 const normalize = (value, min, max) => (value - min) / ((max - min) || 1);
 
+/**
+ * Realiza o Pré-Processamento e Engenharia de Recursos (Feature Engineering).
+ * 
+ * Analisa todo o universo de produtos e usuários para construir o "Contexto Global"
+ * necessário para normalizar números e criar os índices de One-Hot Encoding.
+ * 
+ * Principais responsabilidades:
+ * 1. Mapear os extremos (min/max) de preço e idade para o Min-Max Scaling (escala 0 a 1).
+ * 2. Criar dicionários de índices (vocabulário) para categorias e tipos de armazenamento.
+ * 3. Calcular a média de idade dos compradores por produto (agregação comportamental).
+ * 4. Determinar dinamicamente a dimensionalidade dos vetores para a Rede Neural.
+ * 
+ * @param {Array<Object>} products - Lista de produtos obtida do Banco de Dados
+ * @param {Array<Object>} users - Lista de usuários e seus históricos de compras do BD
+ * @returns {Object} Objeto de contexto com regras de normalização, índices e estatísticas
+ */
 function makeContext(products, users) {
     const ages = users.map(u => u.age);
     const prices = products.map(p => p.price);
@@ -81,9 +99,27 @@ function makeContext(products, users) {
     };
 }
 
+// 
 const oneHotWeighted = (index, length, weight) =>
     tf.oneHot(index, length).cast('float32').mul(weight);
 
+/**
+ * Converte um produto (dados brutos como texto, preço e categoria) em um 
+ * VETOR NUMÉRICO (Embedding) contínuo, normalizado entre 0 e 1 e ponderado, pois
+ * cada atributo possui um peso diferente, ex: preço poderá ter um peso maior do que a idade, na 
+ * preferência da pessoa.
+ * 
+ * Esse vetor numérico tem dois papéis centrais no sistema:
+ * 1. É o "Embedding" salvo na coluna vetorial do Banco de Dados para busca por similaridade (KNN/Cosseno).
+ * 2. É combinado com o vetor do usuário [userVector + productVector] para alimentar a Rede Neural.
+ * 
+ * Estrutura do vetor resultante:
+ * [ preço_norm*peso, idade_média_norm*peso, categoria_one_hot*peso, armazenamento_one_hot*peso ]
+ *
+ * @param {Object} product - Dados do produto ({ name, price, category, storage })
+ * @param {Object} context - Metadados de normalização (min/max preços, índices one-hot)
+ * @returns {tf.Tensor1D} Tensor unidimensional com o embedding ponderado do produto
+ */
 function encodeProduct(product, context) {
     const price = tf.tensor1d([
         normalize(
@@ -115,6 +151,27 @@ function encodeProduct(product, context) {
     return tf.concat1d([price, age, category, storage]);
 }
 
+/**
+ * Converte um USUÁRIO em um VETOR NUMÉRICO (Embedding do Usuário) no mesmo 
+ * espaço dimensional dos produtos (mesma quantidade de dimensões e escalas).
+ * 
+ * Essa função trata dois cenários fundamentais em recomendação:
+ * 
+ * 1. USUÁRIO COM HISTÓRICO:
+ *    Calcula o "centro de massa" (centróide / média vetorial) de todos os produtos 
+ *    que o usuário já comprou. O vetor resultante representa o "gosto médio" do cliente
+ *    (suas categorias preferidas, faixa de preço média e tipo de armazenamento usual).
+ * 
+ * 2. USUÁRIO NOVO (Cold-Start Problem - Ex: "Josézin da Silva"):
+ *    Quando o usuário não tem compras anteriores, o modelo não sabe suas preferências
+ *    de preço ou categoria. Nesse caso, gera um vetor baseado EXCLUSIVAMENTE na sua idade,
+ *    preenchendo os outros atributos com zeros. A Rede Neural usará a idade para aproximá-lo
+ *    de produtos tipicamente consumidos por pessoas da mesma faixa etária.
+ * 
+ * @param {Object} user - Dados do usuário ({ id, name, age, purchases: [...] })
+ * @param {Object} context - Metadados e limites globais gerados por makeContext
+ * @returns {tf.Tensor2D} Tensor no formato [1, dimentions] representando o perfil do usuário
+ */
 function encodeUser(user, context) {
     if (user.purchases && user.purchases.length) {
         return tf.stack(
@@ -139,6 +196,23 @@ function encodeUser(user, context) {
     ]).reshape([1, context.dimentions]);
 }
 
+/**
+ * Constrói o Dataset de Treinamento supervisionado para a Rede Neural (Tensores xs e ys).
+ * 
+ * Transforma a recomendação em uma tarefa de CLASSIFICAÇÃO BINÁRIA:
+ * "Dado o par (Usuário X, Produto Y), qual é a probabilidade dele comprar o produto?"
+ * 
+ * Como o dataset é gerado:
+ * 1. Cruza todos os usuários que têm histórico com todos os produtos do catálogo (Produto Cartesiano).
+ * 2. Para cada par, concatena [Vetor do Usuário (N dimensões) + Vetor do Produto (N dimensões)].
+ *    O vetor resultante de entrada terá tamanho 2 * N (inputDimention).
+ * 3. Define o rótulo (Label / Ground Truth):
+ *    - 1 (Positivo): O usuário comprou esse produto no histórico.
+ *    - 0 (Negativo): O usuário não comprou esse produto.
+ * 
+ * @param {Object} context - Objeto de contexto contendo usuários, produtos e dimensões
+ * @returns {Object} { xs: Tensor2D das entradas, ys: Tensor2D dos rótulos (0 ou 1), inputDimention }
+ */
 function createTrainingData(context) {
     const inputs = [];
     const labels = [];
@@ -223,6 +297,23 @@ async function configureNeuralNetAndTrain(trainData) {
     return model;
 }
 
+/**
+ * Orquestrador do Pipeline de Treinamento e Indexação Vetorial.
+ * 
+ * Executa de forma assíncrona dentro de um Web Worker (thread secundária), garantindo
+ * que cálculos pesados de Tensores e épocas de treino não congelem a interface (UI).
+ * 
+ * Etapas da esteira (Pipeline):
+ * 1. OBTENÇÃO DOS DADOS: Consome o catálogo de produtos diretamente do Banco de Dados via API REST.
+ * 2. FEATURE ENGINEERING: Gera o contexto estatístico (makeContext) e os Embeddings dos produtos (encodeProduct).
+ * 3. INDEXAÇÃO VETORIAL: Salva os embeddings calculados na coluna vetorial do Banco de Dados (POST /api/products/embeddings).
+ * 4. TREINAMENTO: Constrói a matriz de pares (createTrainingData) e ajusta os pesos da Rede Neural via Backpropagation.
+ * 5. FEEDBACK VISUAL: Emite mensagens via postMessage para atualizar a barra de progresso, gráficos no TF Visor
+ *    e liberar o botão "Run Recommendation" na tela.
+ * 
+ * @param {Object} payload
+ * @param {Array<Object>} payload.users - Lista de clientes e seus históricos vindos do Banco de Dados
+ */
 async function trainModel({ users }) {
     console.log('[Worker] Iniciando treinamento com clientes da padaria:', users.length);
 
