@@ -3,96 +3,67 @@ import { workerEvents } from '../events/constants.js';
 
 console.log('Model training worker initialized');
 let _globalCtx = {};
-let _model = null
+let _model = null;
+
+const API_BASE_URL = self.location.port === '3000' 
+    ? 'http://localhost:3002/api' 
+    : `${self.location.origin}/api`;
 
 const WEIGHTS = {
     category: 0.4,
     color: 0.3,
     price: 0.2,
     age: 0.1
-}
+};
 
-/*===================================================================================================|                                   SETUP DO DATASET PARA TREINAMENTO                                 ||  ==
-        Explicação:
-=======================================================================================================
+/*===================================================================================================
+                                   SETUP DO DATASET PARA TREINAMENTO
+===================================================================================================*/
 
-Exemplo de Usuário:
-{
-    "id": 1,
-    "name": "Ana Lima",
-    "age": 25,
-    "purchases": [
-        {
-            "id": 1,  "name": "Fones de Ouvido Sem Fio", "category": "eletrônicos", "price": 129.99, "color": "preto"
-        }
-    ]
-}
-
-
-Após a codificação, o modelo não nomes ou palavras. Ele vê um VETOR NUMÉRICO (todos normalizados entre 0-1)
-Exemplo: [preco_normalizado, idade_normalizada, cat_one_hot, cor_one_hot]
-
-
-
-=======================================================================================================
-*/
-
-
-const normalize = (value, min, max) => (value - min) / ((max - min) || 1)
+const normalize = (value, min, max) => (value - min) / ((max - min) || 1);
 
 function makeContext(products, users) {
-    const ages = users.map(u => u.age)
-    const prices = products.map(p => p.price)
+    const ages = users.map(u => u.age);
+    const prices = products.map(p => p.price);
 
     // Normalizando os dados
-    // Coleta o mínimo e máximo da idade
-    const minAge = Math.min(...ages)
-    const maxAge = Math.max(...ages)
-    // Coleta o mínimo e máximo preço
-    const minPrice = Math.min(...prices)
-    const maxPrice = Math.max(...prices)
-    // Normaliza as Cores
-    const colors = [...new Set(products.map(p => p.color))]
-    const categories = [...new Set(products.map(p => p.category))]
+    const minAge = Math.min(...ages);
+    const maxAge = Math.max(...ages);
+    const minPrice = Math.min(...prices);
+    const maxPrice = Math.max(...prices);
+    const colors = [...new Set(products.map(p => p.color))];
+    const categories = [...new Set(products.map(p => p.category))];
 
     const colorsIndex = Object.fromEntries(
-        colors.map((color, index) => {
-            return [color, index]
-        })
-    )
+        colors.map((color, index) => [color, index])
+    );
 
     const categoriesIndex = Object.fromEntries(
-        categories.map((category, index) => {
-            return [category, index]
-        })
-    )
+        categories.map((category, index) => [category, index])
+    );
 
-    // Computar a média de idade dos comprados por produto 
-    // (ajuda a personalizar)
-    const midAge = (minAge + maxAge) / 2
-    const ageSums = {}
-    const ageCounts = {}
+    // Computar a média de idade dos compradores por produto
+    const midAge = (minAge + maxAge) / 2;
+    const ageSums = {};
+    const ageCounts = {};
 
-    // Iterar nos usuários
     users.forEach(user => {
-        user.purchases.forEach(p => {
+        (user.purchases || []).forEach(p => {
             ageSums[p.name] = (ageSums[p.name] || 0) + user.age;
             ageCounts[p.name] = (ageCounts[p.name] || 0) + 1;
-        })
+        });
     });
 
-    //
     const productAvgAgeNorm = Object.fromEntries(
         products.map(product => {
             const avg = ageCounts[product.name] ?
                 ageSums[product.name] / ageCounts[product.name] :
-                midAge
+                midAge;
 
-            return [product.name, normalize(avg, minAge, maxAge)]
+            return [product.name, normalize(avg, minAge, maxAge)];
         })
-    )
+    );
 
-    // Retornar o tensor
     return {
         products,
         users,
@@ -106,48 +77,44 @@ function makeContext(products, users) {
         numCategories: categories.length,
         numColors: colors.length,
         dimentions: 2 + categories.length + colors.length
-    }
+    };
 }
 
 const oneHotWeighted = (index, length, weight) =>
-    tf.oneHot(index, length).cast('float32').mul(weight)
+    tf.oneHot(index, length).cast('float32').mul(weight);
 
 function encodeProduct(product, context) {
-    // Normalizand o dado para ficar de 0 a 1
-    // aplicar o peso na recomendação
     const price = tf.tensor1d([
         normalize(
             product.price,
             context.minPrice,
             context.maxPrice
         ) * WEIGHTS.price
-    ])
+    ]);
 
     const age = tf.tensor1d([
         (
             context.productAvgAgeNorm[product.name] ?? 0.5
         ) * WEIGHTS.age
-    ])
+    ]);
 
     const category = oneHotWeighted(
         context.categoriesIndex[product.category],
         context.numCategories,
         WEIGHTS.category
-    )
+    );
 
     const color = oneHotWeighted(
         context.colorsIndex[product.color],
         context.numColors,
         WEIGHTS.color
-    )
+    );
 
-    return tf.concat1d(
-        [price, age, category, color]
-    )
+    return tf.concat1d([price, age, category, color]);
 }
 
 function encodeUser(user, context) {
-    if (user.purchases.length) {
+    if (user.purchases && user.purchases.length) {
         return tf.stack(
             user.purchases.map(
                 product => encodeProduct(product, context)
@@ -157,100 +124,82 @@ function encodeUser(user, context) {
             .reshape([
                 1,
                 context.dimentions
-            ])
+            ]);
     }
 
-    return tf.concat1d(
-        [
-            tf.zeros([1]), // O preço é ignorado
-            tf.tensor1d([
-                normalize(user.age, context.minAge, context.maxAge)
-                * WEIGHTS.age
-            ]),
-            tf.zeros([context.numCategories]), // Categorias ignoradas
-            tf.zeros([context.numColors]), // Cores ignoradas
-        ]
-    ).reshape([1, context.dimentions])
+    return tf.concat1d([
+        tf.zeros([1]), // O preço é ignorado
+        tf.tensor1d([
+            normalize(user.age, context.minAge, context.maxAge) * WEIGHTS.age
+        ]),
+        tf.zeros([context.numCategories]), // Categorias ignoradas
+        tf.zeros([context.numColors]), // Cores ignoradas
+    ]).reshape([1, context.dimentions]);
 }
 
 function createTrainingData(context) {
-    const inputs = []
-    const labels = []
+    const inputs = [];
+    const labels = [];
     context.users
-        .filter(u => u.purchases.length)
+        .filter(u => u.purchases && u.purchases.length)
         .forEach(user => {
-            const userVector = encodeUser(user, context).dataSync()
+            const userVector = encodeUser(user, context).dataSync();
             context.products.forEach(product => {
-                const productVector = encodeProduct(product, context).dataSync()
+                const productVector = encodeProduct(product, context).dataSync();
 
                 const label = user.purchases.some(
                     purchase => purchase.name === product.name ? 1 : 0
-                )
+                );
 
-                // combinar user + product
-                inputs.push([...userVector, ...productVector])
-                labels.push(label)
-            })
-        })
+                inputs.push([...userVector, ...productVector]);
+                labels.push(label);
+            });
+        });
 
     return {
         xs: tf.tensor2d(inputs),
         ys: tf.tensor2d(labels, [labels.length, 1]),
         inputDimention: context.dimentions * 2
-        // Tamanho  = userVector + productVector
-    }
+    };
 }
-
 
 /*===================================================================================================
         Configuração e Treinamento da Rede Neural
 ===================================================================================================*/
 async function configureNeuralNetAndTrain(trainData) {
-    const model = tf.sequential()
+    const model = tf.sequential();
 
-    // Camada de entrada 
-    // inputShape: Número de features por exemplo de treino (trainData.inputDimention)
-    // Exemplo: Se o vetor Usuario+Produto = 20 números, então inputDim = 20
-    // units: 128 neurônios (muitos olhos para detectar padrões)
-    // activation: 'relu' (mantém apenas sinais positivos, ajuda a aprender padrões não-lineares)
     model.add(
         tf.layers.dense({
             inputShape: [trainData.inputDimention],
             units: 128,
             activation: 'relu'
         })
-    )
+    );
 
-    // Camada oculta 1
-    // - 64 neurônios: menos que a primeira camada (começa a comprimir a informação)
     model.add(
         tf.layers.dense({
             units: 64,
             activation: 'relu'
         })
-    )
+    );
 
-    // Camada oculta 2
-    // - 32 neurônios: menos que a primeira camada (começa a comprimir a informação)
     model.add(
         tf.layers.dense({
             units: 32,
             activation: 'relu'
         })
-    )
+    );
 
-    // Camada de Saída
-    // 1 neurônio porque vamos retornar apenas uma pontuação de recomendação
-    // activation sigmoid: compirme o resultado para o intervalo 0 - 1.
     model.add(
         tf.layers.dense({ units: 1, activation: 'sigmoid' })
-    )
+    );
 
     model.compile({
         optimizer: tf.train.adam(0.01),
         loss: 'binaryCrossentropy',
         metrics: ['accuracy']
-    })
+    });
 
     await model.fit(trainData.xs, trainData.ys, {
         epochs: 100,
@@ -264,108 +213,146 @@ async function configureNeuralNetAndTrain(trainData) {
                     loss: logs.loss,
                     accuracy: logs.acc
                 });
-
             }
         }
-    })
+    });
 
-    return model
+    return model;
 }
 
-
 async function trainModel({ users }) {
-    console.log('Training model with users:', users)
+    console.log('Training model with users:', users);
+
+    postMessage({ type: workerEvents.progressUpdate, progress: { progress: 30 } });
+
+    // 1. Obter produtos da API do banco de dados vetorial
+    let products = [];
+    try {
+        const prodRes = await fetch(`${API_BASE_URL}/products`);
+        if (prodRes.ok) {
+            products = await prodRes.json();
+        } else {
+            throw new Error('Falha ao obter produtos da API');
+        }
+    } catch (err) {
+        console.warn('[Worker] Usando fallback local para /data/products.json:', err.message);
+        products = await (await fetch('/data/products.json')).json();
+    }
 
     postMessage({ type: workerEvents.progressUpdate, progress: { progress: 50 } });
 
-    // 
-    const products = await (await fetch('/data/products.json')).json()
-
-    const context = makeContext(products, users)
+    // 2. Gerar o contexto e os vetores de cada produto
+    const context = makeContext(products, users);
     context.productVectors = products.map(product => {
         return {
+            id: product.id,
             name: product.name,
             meta: { ...product },
             vector: encodeProduct(product, context).dataSync()
-        }
-    })
-
+        };
+    });
 
     _globalCtx = context;
 
-    const trainData = createTrainingData(context)
+    // 3. Persistir os embeddings gerados no Banco de Dados Vetorial!
+    try {
+        const itemsToSave = context.productVectors.map(pv => ({
+            id: pv.id,
+            vector: Array.from(pv.vector)
+        }));
+        await fetch(`${API_BASE_URL}/products/embeddings`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ items: itemsToSave })
+        });
+        console.log('[Worker] Embeddings gravados com sucesso no Banco de Dados Vetorial!');
+    } catch (err) {
+        console.warn('[Worker] Aviso ao salvar embeddings no banco:', err.message);
+    }
 
-    _model = await configureNeuralNetAndTrain(trainData)
+    // 4. Treinar a rede neural
+    const trainData = createTrainingData(context);
+    _model = await configureNeuralNetAndTrain(trainData);
 
-
-
-
-    //postMessage({
-    //    type: workerEvents.trainingLog,
-    //    epoch: 1,
-    //    loss: 1,
-    //    accuracy: 1
-    //});
-
-    //setTimeout(() => {
     postMessage({ type: workerEvents.progressUpdate, progress: { progress: 100 } });
     postMessage({ type: workerEvents.trainingComplete });
-    //}, 1000);
-
-
 }
-function recommend(user, ctx) {
+
+async function recommend(user, ctx) {
     if (!_model) return;
 
     const context = _globalCtx;
 
-    // Converta o usuário fornecido no vetor de features codificadas
-    // (preço ignorado, idade normalizada, categorias one-hot, cores one-hot)
-    // Isso transforma as informações do usuário no mesmo formato numérico
-    // que foi utilizado para treinar o modelo.
-    const userVector = encodeUser(user, context).dataSync()
+    // Converte o usuário fornecido no vetor de features codificadas
+    const userVector = encodeUser(user, context).dataSync();
 
-    // Em aplicações reais: 
-    // Armazene todos os vetores de produtos em um banco de dados vetorial
-    // (como PostgreSQL, Neo4j ou Pinecone)
-    // Consulta: Encontre os 200 produtos mais próximos do vetor do usuário
-    // Execute _model.predict() apenas nesses produtos
+    // =========================================================================
+    // ETAPA 1: BUSCA NO BANCO DE DADOS VETORIAL (Vector Database Retrieval)
+    // Busca no banco os produtos mais similares ao vetor do usuário via SQL
+    // =========================================================================
+    let candidates = [];
+    try {
+        const response = await fetch(`${API_BASE_URL}/recommendations/vector-search`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                userVector: Array.from(userVector),
+                limit: context.productVectors.length
+            })
+        });
 
-    // Crie pares de entrada: para cada produto, concatene o vetor de usuário
-    // com o vetor codificado do produto.
-    // Por quê? O modelo prevê o "score de compatibilidade" para cada par (usuário, produto)
-    const inputs = context.productVectors.map(({ vector }) => {
-        return [...userVector, ...vector]
-    })
+        if (response.ok) {
+            const result = await response.json();
+            candidates = result.candidates || [];
+            console.log(`[Worker] Banco vetorial retornou ${candidates.length} produtos candidatos.`);
+        }
+    } catch (err) {
+        console.warn('[Worker] Busca vetorial na API não alcançada, usando produtos locais:', err);
+    }
 
-    // Converta todos esses pares (usuario, produto) em um único Tensor.
-    // Formato: [numProdutos, inputDim]
-    const inputTensor = tf.tensor2d(inputs)
+    // Mapeia os produtos a serem avaliados pela rede neural
+    let productsToScore = [];
+    if (candidates.length > 0) {
+        productsToScore = candidates.map(c => {
+            const found = context.productVectors.find(pv => pv.id === c.id || pv.name === c.name);
+            return {
+                id: c.id,
+                name: c.name,
+                meta: { ...c },
+                vector: found ? found.vector : (c.embedding ? new Float32Array(c.embedding) : null),
+                vectorSimilarity: c.vectorSimilarity
+            };
+        }).filter(p => p.vector);
+    } else {
+        productsToScore = context.productVectors;
+    }
 
-    // Roda a rede neural treinada em todos os pares (usuário, produto) de uma vez
-    // O resultado é uma pontuação para cada produto entre 0 e 1.
-    // Quanto maior, maior a probabilidade do usuário querer aquele produto.
-    const predictions = _model.predict(inputTensor)
+    // =========================================================================
+    // ETAPA 2: RE-RANKING COM REDE NEURAL (TensorFlow.js Re-ranking)
+    // A rede neural refinada calcula a pontuação final para cada candidato
+    // =========================================================================
+    const inputs = productsToScore.map(({ vector }) => {
+        return [...userVector, ...vector];
+    });
 
-    // Extraiaas pontuações para um Array JS normal
-    const scores = predictions.dataSync()
+    const inputTensor = tf.tensor2d(inputs);
+    const predictions = _model.predict(inputTensor);
+    const scores = predictions.dataSync();
 
-    const recommendations = context.productVectors.map((item, index) => {
+    const recommendations = productsToScore.map((item, index) => {
         return {
             ...item.meta,
+            id: item.id,
             name: item.name,
-            score: scores[index] // previsão do modelo para este produto
-        }
-    })
+            score: scores[index], // Predição da rede neural (0.00 a 1.00)
+            vectorSimilarity: item.vectorSimilarity !== undefined ? item.vectorSimilarity : null // Similaridade vetorial do banco
+        };
+    });
 
-    const sortedItems = recommendations
-        .sort((a, b) => b.score - a.score)
+    const sortedItems = recommendations.sort((a, b) => b.score - a.score);
 
+    console.log('[Worker] Recomendações prontas para:', user.name);
 
-    //debugger
-    console.log('will recommend for user:', user)
-    // Envie a lista ordenada de produtos recomendados
-    // para a thread principal (a UI pode exibi-los agora).
     postMessage({
         type: workerEvents.recommend,
         user,
@@ -373,13 +360,12 @@ function recommend(user, ctx) {
     });
 }
 
-
 const handlers = {
     [workerEvents.trainModel]: trainModel,
     [workerEvents.recommend]: d => recommend(d.user, _globalCtx),
 };
 
-self.onmessage = e => {
+self.onmessage = async e => {
     const { action, ...data } = e.data;
-    if (handlers[action]) handlers[action](data);
+    if (handlers[action]) await handlers[action](data);
 };

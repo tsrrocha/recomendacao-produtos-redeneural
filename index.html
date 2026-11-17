@@ -12,7 +12,24 @@
 
 <body>
     <div class="main">
-        <h1>E-commerce Recommendation System</h1>
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <h1>E-commerce Recommendation System</h1>
+        </div>
+
+        <!-- Banner com status do Banco de Dados Vetorial -->
+        <div id="dbStatusBanner" class="alert alert-light border shadow-sm d-flex flex-wrap align-items-center justify-content-between py-2 px-3 mb-3">
+            <div class="d-flex align-items-center gap-2">
+                <span class="badge bg-primary fs-6"><i class="bi bi-database-check"></i> Vector DB</span>
+                <span id="dbEngineText" class="fw-semibold">SQLite Local (node:sqlite)</span>
+                <span class="text-muted">&bull;</span>
+                <span id="dbVectorsCount" class="text-secondary small">Conectando...</span>
+            </div>
+            <div>
+                <button id="dbResetBtn" class="btn btn-sm btn-outline-danger" title="Restaurar dados originais do JSON para o Banco">
+                    <i class="bi bi-arrow-counterclockwise"></i> Resetar Banco
+                </button>
+            </div>
+        </div>
 
         <div class="row mt-3">
             <div class="col-md-4">

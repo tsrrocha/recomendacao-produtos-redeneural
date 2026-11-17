@@ -1,21 +1,29 @@
 {
     "name": "ecommerce-recomendations-with-ml",
     "version": "1.0.0",
-    "description": "An e-commerce recommendation system with TensorFlow.js",
-    "main": "index.js",
+    "description": "An e-commerce recommendation system with TensorFlow.js and Vector Database",
+    "main": "server.js",
     "type": "module",
     "scripts": {
-        "start": "browser-sync start --server --files \"index.html, data/*.json, src/**/*.js\" --port 3000",
-        "test": "echo \"Error: no test specified\" && exit 1"
+        "start": "node server.js",
+        "dev": "node --watch server.js",
+        "browser-sync": "browser-sync start --server --files \"index.html, src/**/*.js\" --port 3000",
+        "test": "node test_e2e.mjs"
     },
     "keywords": [
         "ecommerce",
         "tensorflow",
         "recommendation",
+        "vector-database",
+        "sqlite-vector",
         "javascript"
     ],
     "author": "",
     "license": "ISC",
+    "dependencies": {
+        "cors": "^2.8.5",
+        "express": "^4.21.2"
+    },
     "devDependencies": {
         "browser-sync": "^3.0.4"
     }
